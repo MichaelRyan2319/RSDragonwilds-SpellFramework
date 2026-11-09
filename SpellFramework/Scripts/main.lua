@@ -483,6 +483,7 @@ local NewActors = {}      -- spell actors created since the last tick
 local Cooldowns = {}      -- variant id -> os.clock() when usable again
 local Pending = {}        -- { at, fn, name } run when a Lua-played cast animation reaches its cast point
 local MontageCache = {}   -- base spell path -> montage
+local GroupMontage = {}   -- spell id -> object path of the body montage the game played when that spell was cast
 
 -- The cast animation of a game spell (its PlayMontage module).
 local function CastMontage(base)
@@ -499,6 +500,58 @@ local function CastMontage(base)
     end
     MontageCache[path] = montage
     return montage or nil
+end
+
+-- Player spell animations only move the body when played through the copy the game
+-- makes of a montage for each character, which has one slot per body part. Lua never
+-- builds that copy itself (doing so crashed the game); it reuses the game's.
+local function SlotCount(montage)
+    local ok, n = pcall(function() return montage.SlotAnimTracks:GetArrayNum() end)
+    return ok and n or 0
+end
+
+local function ObjectPathOf(obj)
+    return U.FullName(obj):match("^%S+ (.+)$")
+end
+
+-- The montage the game's spell animation player is playing (or last played) for the pawn.
+local function CurrentSpellMontage(pawn)
+    local magic = U.Get(pawn, "PlayerUtilityMagicComponent")
+    local player = U.Valid(magic) and U.Get(magic, "SpellAnimationPlayer")
+    local m = U.Valid(player) and U.Get(player, "CurrentMontage")
+    if U.Valid(m) and SlotCount(m) > 1 then return m end
+    return nil
+end
+
+-- The game's body copy of `montage` for this pawn (named <montage>_<n>, inside the pawn).
+local function BodyCopy(montage, pawn)
+    local base, pawnPath = U.Name(montage), ObjectPathOf(pawn)
+    if not pawnPath then return nil end
+    local best = nil
+    for _, m in ipairs(FindAllOf("AnimMontage") or {}) do
+        local name = U.Name(m)
+        if name:sub(1, #base + 1) == base .. "_" and name:sub(#base + 2):match("^%d+$") then
+            local path = ObjectPathOf(m) or ""
+            if path:sub(1, #pawnPath + 1) == pawnPath .. "." and SlotCount(m) > 1 then best = m end
+        end
+    end
+    return best
+end
+
+-- Picks the montage to play for a Lua cast: the body copy whenever one exists.
+local function MontageFor(def, variant, pawn)
+    local function Recorded()
+        local path = GroupMontage[def.id]
+        if not path then return nil end
+        local ok, m = pcall(StaticFindObject, path)
+        if ok and U.Valid(m) then return m end
+        return nil
+    end
+    local own = variant and variant.base and CastMontage(variant.base)
+    local group = CastMontage(def.base)
+    local pick = (own and BodyCopy(own, pawn)) or Recorded() or (group and BodyCopy(group, pawn))
+    if pick then return pick, true end
+    return own or group, false
 end
 
 local function MakeContext(def, variant)
@@ -521,18 +574,34 @@ local function MakeContext(def, variant)
     end
 
     -- Plays the spell's cast animation and calls fn at the moment the spell is cast.
+    -- The player can't walk during the animation, as with the game's own spells.
     function ctx.Cast(fn)
         local delay = spell.castTime or def.castTime or 2.0
-        local montage = CastMontage(spell.base or def.base)
         local pawn = U.Pawn()
-        local played = false
-        if montage and pawn then
+        local played, length, body = false, 0, false
+        if pawn then
+            local montage
+            montage, body = MontageFor(def, variant, pawn)
             local mesh = U.Get(pawn, "Mesh")
             local ok, anim = U.Call(mesh, "GetAnimInstance")
-            if ok and U.Valid(anim) then played = U.Call(anim, "Montage_Play", montage, 1.0, 0, 0.0, true) end
+            if montage and ok and U.Valid(anim) then
+                local okPlay, res = U.Call(anim, "Montage_Play", montage, 1.0, 0, 0.0, true)
+                played = okPlay and type(res) == "number" and res > 0
+                length = played and res or 0
+                U.DebugLog("Cast '%s': playing %s (%s, %.2fs)", spell.id, U.Name(montage), body and "body copy" or "original", length)
+            end
         end
         if not played then delay = 0 end
         Pending[#Pending + 1] = { at = os.clock() + delay, fn = fn, name = spell.id }
+        local pc = U.PlayerController()
+        if played and body and pc then
+            local hold = math.min(math.max(length - 0.25, delay), delay + 3)
+            if U.Call(pc, "SetIgnoreMoveInput", true) then
+                Pending[#Pending + 1] = { at = os.clock() + hold, name = spell.id, fn = function()
+                    U.Call(pc, "SetIgnoreMoveInput", false)
+                end }
+            end
+        end
     end
     return ctx
 end
@@ -643,6 +712,10 @@ local function UpdateCasts()
                 cast.done = true
             elseif def.variants then
                 -- Stop the game's cast straight away: the animation plays once a variant is picked.
+                -- Remember the body montage the game started, to play it again then.
+                local current = pawn and CurrentSpellMontage(pawn)
+                if current then GroupMontage[def.id] = ObjectPathOf(current) end
+                U.DebugLog("Cast '%s': game montage %s", def.id, current and U.Name(current) or "not found")
                 local magic = pawn and U.Get(pawn, "PlayerUtilityMagicComponent")
                 if U.Valid(magic) then U.Call(magic, "Server_CancelSpell") end
                 cast.done = true

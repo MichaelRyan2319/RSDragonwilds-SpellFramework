@@ -8,7 +8,6 @@ local UEHelpers = require("UEHelpers")
 local U = require("sf.util")
 
 local UI = {}
-local counter = 0
 local active = nil      -- the open Wheel or Prompt
 local toasts = {}
 
@@ -18,8 +17,7 @@ local GREY = { R = 0.7, G = 0.7, B = 0.7, A = 1 }
 local RED = { R = 0.95, G = 0.4, B = 0.35, A = 1 }
 
 local function New(classPath, outer, name)
-    counter = counter + 1
-    return StaticConstructObject(StaticFindObject(classPath), outer, FName(name .. "_" .. counter))
+    return StaticConstructObject(StaticFindObject(classPath), outer, FName(U.UniqueName(name)))
 end
 
 local function Root(name)

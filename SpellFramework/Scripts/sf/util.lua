@@ -135,9 +135,19 @@ end
 
 local RF_PUBLIC, RF_ROOTSET = 0x1, 0x80
 
+-- Every object the mod creates gets a name no other object has. A fixed name
+-- fails (nothing is created) when an object with that name still exists, e.g.
+-- when the game rebuilds a list and we add our entries again, or the mod is reloaded.
+local SESSION = tostring(os.time())
+local nameCount = 0
+function U.UniqueName(base)
+    nameCount = nameCount + 1
+    return string.format("%s_%s_%d", base, SESSION, nameCount)
+end
+
 -- A copy of `template` (subobjects included) that is never garbage collected.
 function U.Clone(template, outer, name)
-    local ok, obj = pcall(StaticConstructObject, template:GetClass(), outer or U.Transient(), FName(name),
+    local ok, obj = pcall(StaticConstructObject, template:GetClass(), outer or U.Transient(), FName(U.UniqueName(name)),
         RF_PUBLIC | RF_ROOTSET, 0, false, false, template)
     if ok and U.Valid(obj) then return obj end
     U.Log("Could not copy %s: %s", U.FullName(template), tostring(obj))
@@ -148,7 +158,7 @@ function U.NewObject(classPath, outer, name, keep)
     local cls = StaticFindObject(classPath)
     if not U.Valid(cls) then return nil end
     local flags = keep and (RF_PUBLIC | RF_ROOTSET) or 0
-    local ok, obj = pcall(StaticConstructObject, cls, outer or U.Transient(), FName(name), flags)
+    local ok, obj = pcall(StaticConstructObject, cls, outer or U.Transient(), FName(U.UniqueName(name)), flags)
     if ok and U.Valid(obj) then return obj end
     return nil
 end
