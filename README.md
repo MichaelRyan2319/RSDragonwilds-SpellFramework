@@ -12,12 +12,12 @@ spells:
 A spell can have **variants**: casting it opens a second wheel where you pick
 one. That keeps the Spellbook down to one entry per spell.
 
-It comes with one spell:
+The framework has no spells of its own. Each spell is a separate mod that needs
+the framework:
 
-| Spell | Variant | What it does | Runes | Cooldown |
-| --- | --- | --- | --- | --- |
-| **Accio** | Accio | Type an item's name (it autocompletes) and it flies from nearby storage into your bag. Linked chests within 30 m count. Add an amount, e.g. `20 clay`. Runes are only used when something arrives. | 1 Law, 1 Air | 2 s |
-| | Accio Everything | Every item lying on the ground within 25 m flies to you. | 1 Law, 3 Air | 10 s |
+| Spell mod | What it does |
+| --- | --- |
+| [Accio](https://github.com/MichaelRyan2319/RSDragonwilds-AccioSpell) | Summon an item by name from nearby storage, or pull every item on the ground around you |
 
 - Works in your own world (single player, or as the host).
 - Your saves stay valid with or without the mod (see "Saves" below).
@@ -43,7 +43,10 @@ keeps it up to date.
    UE4SS, so Mod Loader 1.1.0 or later offers to add
    `MichaelRyan2319/RSDragonwilds-UE4SS` as well; click **Yes**. With an older
    Mod Loader, add `MichaelRyan2319/RSDragonwilds-UE4SS` yourself first.
-3. Start the game, load your world, press P and open **Custom Spells**.
+3. Add the spell mods you want (e.g. `MichaelRyan2319/RSDragonwilds-AccioSpell`).
+   Adding a spell mod first also works: Mod Loader 1.1.0 or later then offers to
+   add the framework and UE4SS.
+4. Start the game, load your world, press P and open **Custom Spells**.
 
 ## Install by hand
 
@@ -53,7 +56,9 @@ keeps it up to date.
    then open the `RSDragonwilds` folder (the one with `Binaries` and `Content`
    in it) and extract the zip there. The mod ends up in
    `Binaries\Win64\ue4ss\Mods\SpellFramework`.
-3. Start the game and load your world.
+3. Install the spell mods you want the same way. Their files go into
+   `SpellFramework\Spells`.
+4. Start the game and load your world.
 
 The mod folder contains `enabled.txt`, so UE4SS loads it without any change to
 `mods.txt`. To install from this repo instead of a release, copy the
@@ -67,23 +72,26 @@ The mod folder contains `enabled.txt`, so UE4SS loads it without any change to
 3. Hold **Q**, pick the spell and cast it. A spell with variants opens a second
    wheel; pick a variant and the cast animation plays.
 
-Accio asks which item you want: type part of its name, choose a suggestion with
-Up/Down (Tab completes it) and press Enter. Esc cancels without using runes.
-
 ## Making your own spells
 
 Copy `Spells\_Template.lua`, rename the copy (files starting with `_` are
 ignored), edit it and restart the game. The template explains every field and
 the helpers a spell can use: messages, the player's bag, nearby storage, items
-on the ground, text prompts and wheels. `Accio.lua` is a complete example with
-variants and a text prompt.
+on the ground, text prompts and wheels. The
+[Accio mod](https://github.com/MichaelRyan2319/RSDragonwilds-AccioSpell)'s
+`Accio.lua` is a complete example with variants and a text prompt.
 
 A spell file sets an `id`, a `name`, a `description`, an `icon`, a `base` (the
 game spell whose cast animation it uses), a rune `cost`, a `cooldown`, and an
 `OnCast` function. A spell with variants lists them under `variants` instead.
 
-If UE4SS can't list the folder, the mod only loads the files named in
-`Spells\_list.txt`, so add new files there too.
+To share a spell as its own mod, copy the Accio mod's layout:
+- put the file at `SpellFramework/Spells/<Name>.lua` in the zip;
+- add a `modloader.json` that requires this framework, so Mod Loader offers it.
+
+If UE4SS can't list the folder, the log says so, and the framework loads only
+the files named in `Spells\_list.txt` (one file name per line; create it
+yourself).
 
 ## Settings
 
@@ -104,8 +112,8 @@ of Siphon Runes, a spell everyone has. The mod remembers which radial slot holds
 which custom spell in its own file, `saved_slots_<character>.txt`, in the mod
 folder.
 
-If you remove the mod, those slots show Siphon Runes, and your character loads
-normally.
+If you remove the framework or a spell mod, those slots show Siphon Runes, and
+your character loads normally.
 
 ## Achievements
 

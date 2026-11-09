@@ -6,7 +6,7 @@
     dragged into the spell radial (Q) and are cast like the game's own spells.
 
     A spell can have variants. Casting it then opens a second wheel where you pick
-    the variant (Accio works this way).
+    the variant (the Accio spell mod works this way).
 
     How it fits into the game:
       * Each custom spell is a copy of one of the game's utility spells (its

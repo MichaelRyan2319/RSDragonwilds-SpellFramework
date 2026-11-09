@@ -49,7 +49,8 @@ return {
     --                         otherwise they're taken just before OnCast runs
     --   animation = "manual"  OnCast runs straight after the pick, and plays the
     --                         animation itself with ctx.Cast(fn), e.g. after asking
-    --                         the player something (see Accio.lua)
+    --                         the player something (see Accio.lua in the Accio mod,
+    --                         github.com/MichaelRyan2319/RSDragonwilds-AccioSpell)
     --
     -- variants = {
     --     { id = "my_spell_a", name = "Version A", cost = { Air = 1 }, cooldown = 3,
