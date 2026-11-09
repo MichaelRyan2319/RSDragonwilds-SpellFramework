@@ -285,4 +285,29 @@ function U.ListLuaFiles(absFolder)
     return nil
 end
 
+-------------------------------------------------------------------- update loop
+
+-- Calls fn on the game thread every `ms` milliseconds, for as long as the game runs.
+-- LoopInGameThreadWithDelay keeps all of the mod's Lua on the game thread. The older
+-- LoopAsync + ExecuteInGameThread pattern runs Lua on two threads at once; once, at
+-- startup, that lost the queued callback and the loop never ran again.
+function U.GameThreadLoop(ms, fn)
+    if type(LoopInGameThreadWithDelay) == "function" then
+        local ok = pcall(LoopInGameThreadWithDelay, ms, function() fn() end)
+        if ok then return end
+    end
+    -- Older UE4SS: queue one call at a time, and queue again if one never ran.
+    local queuedAt = nil
+    LoopAsync(ms, function()
+        local now = os.clock()
+        if queuedAt and now - queuedAt < 2 then return false end
+        queuedAt = now
+        ExecuteInGameThread(function()
+            queuedAt = nil
+            fn()
+        end)
+        return false
+    end)
+end
+
 return U

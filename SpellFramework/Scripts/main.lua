@@ -768,26 +768,19 @@ local function TryStart()
     return true
 end
 
-local queued = false
 local started = false
-LoopAsync(50, function()
-    if queued then return false end
-    queued = true
-    ExecuteInGameThread(function()
-        queued = false
-        if not started then
-            local ok, res = pcall(TryStart)
-            if not ok then
-                U.Log("Startup error: %s", tostring(res))
-                started = true
-            elseif res then
-                started = true
-            end
-            return
+U.GameThreadLoop(50, function()
+    if not started then
+        local ok, res = pcall(TryStart)
+        if not ok then
+            U.Log("Startup error: %s", tostring(res))
+            started = true
+        elseif res then
+            started = true
         end
-        SafeTick()
-    end)
-    return false
+        return
+    end
+    SafeTick()
 end)
 
 pcall(NotifyOnNewObject, "/Script/Dominion.DominionSpellActor", OnNewSpellActor)
