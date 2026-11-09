@@ -10,7 +10,9 @@ spells:
   cooldown.
 
 A spell can have **variants**: casting it opens a second wheel where you pick
-one. That keeps the Spellbook down to one entry per spell.
+one. That keeps the Spellbook down to one entry per spell. The variant wheel
+looks like the game's own spell radial: the same art, fonts and slots, the
+variant's rune cost in the middle, and its description and cooldown below.
 
 The framework has no spells of its own. Each spell is a separate mod that needs
 the framework:
@@ -69,8 +71,11 @@ The mod folder contains `enabled.txt`, so UE4SS loads it without any change to
 1. Press **P** to open the Spellbook. Custom spells are in their own
    **Custom Spells** category.
 2. Drag a spell into a slot of the spell radial, like any other spell.
-3. Hold **Q**, pick the spell and cast it. A spell with variants opens a second
-   wheel; pick a variant and the cast animation plays.
+3. Press **Q** to open the spell radial, pick the spell and cast it.
+4. A spell with variants opens a second wheel. Point at a variant and click
+   (or press its number key), and the cast animation plays. **Esc** closes the
+   wheel. A variant you can't cast yet shows a red cross and says why (cooldown
+   or missing runes). The wheel opens on the variant you picked last.
 
 ## Making your own spells
 
@@ -114,6 +119,11 @@ folder.
 
 If you remove the framework or a spell mod, those slots show Siphon Runes, and
 your character loads normally.
+
+Versions up to 1.1.0 had a bug: each time you loaded your world, the game put
+another copy of every custom spell into the next empty radial slot. Version
+1.2.0 removes those extra copies the first time you load (it keeps the slot
+each spell was in first) and stops new ones appearing.
 
 ## Achievements
 

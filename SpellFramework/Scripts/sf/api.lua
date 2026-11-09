@@ -245,7 +245,8 @@ function API.ResolveCost(cost)
             data = API.FindItem(key)
         end
         if U.Valid(data) then
-            list[#list + 1] = { data = data, count = count, name = API.ItemName(data) }
+            local icon = U.SoftToString(U.Get(data, "Icon"))
+            list[#list + 1] = { data = data, count = count, name = API.ItemName(data), icon = icon ~= "" and icon or nil }
         else
             U.Log("Unknown cost item '%s'", tostring(key))
         end

@@ -1,6 +1,6 @@
 -- Spell Framework: on-screen UI built from plain UMG widgets at run time.
 --   UI.Toast(text, seconds)            short message at the top of the screen
---   UI.Wheel(options, onPick, onCancel) selection wheel (spell variants)
+--   UI.Wheel(spec)                     selection wheel like the game's spell radial (spell variants)
 --   UI.Prompt(spec)                    text box with suggestions (e.g. Accio)
 -- Only one Wheel or Prompt is open at a time. UI.Tick() must be called often
 -- (about every 50 ms) on the game thread, and UI.Key(name) when a key is pressed.
@@ -157,47 +157,268 @@ end
 
 -------------------------------------------------------------------- wheel
 
--- options: { { name, description, icon (texture path), detail (cost/cooldown line), disabled } }
+-- The variant wheel copies the game's spell radial (WBP_SurvivalSorcery_RadialSelector):
+-- the same textures, fonts, colours and sizes, read from the game's own widget.
+local ART = "/Game/Art/UI/Spellcasting/"
+local FONT_HEADER = "/Game/UI/Fonts/Amiri-Regular_Font"
+local FONT_TEXT = "/Game/UI/Fonts/Poppins-Regular_Font"
+local CREAM = { R = 0.88, G = 0.84, B = 0.79, A = 1 }       -- spell names
+local GOLD_TEXT = { R = 0.58, G = 0.40, B = 0.16, A = 1 }   -- costs, cooldowns, descriptions
+local DIM = { R = 0.6, G = 0.57, B = 0.53, A = 1 }
+local BAD = { R = 0.72, G = 0.14, B = 0.12, A = 1 }         -- the game's "can't cast" red
+local SLICES = 12                 -- the game's radial has 12 slots, 30 degrees apart, slot 1 at the top
+local SEG_W, SEG_H = 137.5, 262.5 -- one slot's segment image; its bottom edge sits on the centre
+local KEY_RADIUS = 283            -- where the number-key boxes sit
+
+local fontCache = {}
+local function Font(t, path, size, spacing)
+    pcall(function()
+        local font = t.Font
+        local obj = fontCache[path]
+        if not U.Valid(obj) then obj = U.Load(path) fontCache[path] = obj end
+        if obj then
+            font.FontObject = obj
+            font.TypefaceFontName = FName("Default")
+        end
+        font.Size = size
+        font.LetterSpacing = spacing or 0
+        t:SetFont(font)
+    end)
+end
+
+local function GameText(tree, s, header, size, color, justify)
+    local t = New("/Script/UMG.TextBlock", tree, "Text")
+    pcall(function() t:SetText(FText(s or "")) end)
+    pcall(function() t:SetColorAndOpacity({ SpecifiedColor = color or CREAM, ColorUseRule = 0 }) end)
+    if header then Font(t, FONT_HEADER, size or 13, 120) else Font(t, FONT_TEXT, size or 11, 0) end
+    pcall(function() t:SetJustification(justify or 1) end)
+    return t
+end
+
+-- An image of a fixed size inside a box (SetDesiredSizeOverride has no effect there).
+-- Returns the size box, which is what gets added to the box, and the image.
+local function SizedImage(tree, texturePath, w, h, tint)
+    local box = New("/Script/UMG.SizeBox", tree, "Size")
+    pcall(function() box:SetWidthOverride(w) end)
+    pcall(function() box:SetHeightOverride(h) end)
+    local img = Image(tree, texturePath, w, h, tint)
+    pcall(function() box:SetContent(img) end)
+    return box, img
+end
+
+-- Slot alignment values (EHorizontalAlignment / EVerticalAlignment).
+local FILL, START, CENTER = 0, 1, 2
+
+local function Visible(widget, on)
+    pcall(function() widget:SetVisibility(on and 4 or 1) end) -- SelfHitTestInvisible / Collapsed
+end
+
+local function Opacity(widget, value)
+    pcall(function() widget:SetRenderOpacity(value) end)
+end
+
+-- Picture + count for each item of a cost, like the game's WBP_SpellItemCost.
+local function CostRow(tree, cost)
+    local row = New("/Script/UMG.HorizontalBox", tree, "Cost")
+    for _, c in ipairs(cost or {}) do
+        local col = New("/Script/UMG.VerticalBox", tree, "CostItem")
+        local img = SizedImage(tree, c.icon, 42, 42)
+        pcall(function() col:AddChildToVerticalBox(img):SetHorizontalAlignment(CENTER) end)
+        local count = GameText(tree, tostring(c.count), false, 11, GOLD_TEXT)
+        pcall(function() col:AddChildToVerticalBox(count):SetHorizontalAlignment(CENTER) end)
+        pcall(function() row:AddChildToHorizontalBox(col):SetPadding({ Left = 6, Top = 0, Right = 6, Bottom = 0 }) end)
+    end
+    return row
+end
+
+-- Wheel slot (0-based, clockwise from the top) for each option, spread evenly.
+local function SlotsFor(n)
+    local list, used = {}, {}
+    for i = 1, n do
+        local s = math.floor((i - 1) * SLICES / n + 0.5) % SLICES
+        while used[s] do s = (s + 1) % SLICES end
+        used[s] = true
+        list[i] = s
+    end
+    return list
+end
+
+local function AngleDiff(a, b)
+    return (a - b + 180) % 360 - 180
+end
+
+-- spec: { title, hint, selected, options = { {
+--   name, description, icon (texture path), disabled,
+--   cost = { {icon, count} },        -- shown with pictures in the centre
+--   status = "Cooldown 2s", statusBad = true/false,
+--   detail = "..." } } }             -- text shown when there is no cost list
 function UI.Wheel(spec)
     UI.Close()
     local options = spec.options or {}
     local n = #options
     if n == 0 then return end
+    if n > SLICES then n = SLICES end
     local w, canvas = Root("Wheel")
     local tree = w.WidgetTree
-    local radius = spec.radius or (n <= 4 and 170 or 210)
-    local self = { kind = "wheel", widget = w, options = options, spec = spec, hovered = nil, slots = {}, opened = os.clock() }
+    local cy = -50   -- the game's wheel sits a little above the middle of the screen
+    local self = { kind = "wheel", widget = w, options = options, spec = spec, hovered = nil, slots = {},
+                   opened = os.clock(), pointerAngle = nil }
+    local function At(x, y) return x, cy + y end
 
-    -- Background, using the game's spell radial textures when they load.
-    local bg, okBg = Image(tree, "/Game/Art/UI/Spellcasting/T_Radial_Base_Bg", radius * 2 + 190, radius * 2 + 190, { R = 1, G = 1, B = 1, A = 0.95 })
-    if okBg then Place(canvas, bg, 0, 0, radius * 2 + 190, radius * 2 + 190) else
-        local disc = Box(tree, { R = 0.03, G = 0.025, B = 0.02, A = 0.85 }, 0)
-        Place(canvas, disc, 0, 0, radius * 2 + 150, radius * 2 + 150)
+    -- Layers, bottom to top, all centred on the wheel.
+    local function Layer(tex, sizeX, sizeY, x, y, tint)
+        local img = Image(tree, ART .. tex, sizeX, sizeY, tint)
+        local px, py = At(x or 0, y or 0)
+        Place(canvas, img, px, py, sizeX, sizeY)
+        return img
     end
-    local center, okCenter = Image(tree, "/Game/Art/UI/Spellcasting/T_Radial_Centre_Bg", 300, 300)
-    if okCenter then Place(canvas, center, 0, 0, 300, 300) end
+    Layer("T_Spell_Bg_Shadow", 737.5, 748, 0, 0, { R = 0, G = 0, B = 0, A = 0.8 })
+    Layer("T_Radial_Base_Bg", 630, 629)
+    Layer("T_Radial_Circleline_Bg", 630, 630)
+    Layer("T_Radial_Symbol_Bg", 521, 521)
+    Layer("T_Spell_Radial_Lines", 630, 630)
 
-    for i, opt in ipairs(options) do
-        local angle = math.rad(-90 + (i - 1) * 360 / n)
-        local x, y = math.cos(angle) * radius, math.sin(angle) * radius
-        local frame = Box(tree, { R = 0.1, G = 0.08, B = 0.05, A = 0.0 }, 6)
-        local icon = Image(tree, opt.icon, 84, 84)
-        frame:SetContent(icon)
-        Place(canvas, frame, x, y, 100, 100)
-        local label = Text(tree, (i <= 9 and (i .. "  ") or "") .. (opt.name or "?"), 16, opt.disabled and GREY or WHITE, 1)
-        Place(canvas, label, x, y + 66, nil, nil, 0.5, 0)
-        self.slots[i] = { frame = frame, icon = icon, label = label, angle = angle }
+    -- The 12 slots, each a segment image turned around the centre; options fill some of them.
+    local slotOf = SlotsFor(n)
+    local optionAt = {}
+    for i = 1, n do optionAt[slotOf[i]] = i end
+    for s = 0, SLICES - 1 do
+        local angle = s * 360 / SLICES
+        local seg = New("/Script/UMG.Overlay", tree, "Slice")
+        local function Add(widget, ha, va, top)
+            pcall(function()
+                local sl = seg:AddChildToOverlay(widget)
+                sl:SetHorizontalAlignment(ha)
+                sl:SetVerticalAlignment(va)
+                if top then sl:SetPadding({ Left = 0, Top = top, Right = 0, Bottom = 0 }) end
+            end)
+            return widget
+        end
+        local bg = Add(Image(tree, ART .. "T_Segment_Normal", SEG_W, SEG_H), FILL, FILL)
+        Opacity(bg, 0.6)
+        local i = optionAt[s]
+        local entry = { angle = angle, slot = s }
+        if i then
+            local opt = options[i]
+            entry.highlight = Add(Image(tree, ART .. "T_Segment_Highlight", SEG_W, SEG_H), FILL, FILL)
+            entry.highlightBad = Add(Image(tree, ART .. "T_Segment_Highlight_Disabled", SEG_W, SEG_H, BAD), FILL, FILL)
+            Opacity(entry.highlight, 0)
+            Opacity(entry.highlightBad, 0)
+            -- The icon sits 20 from the segment's outer edge and is turned back upright.
+            local iconBox = Add(SizedImage(tree, opt.icon, 80, 80), CENTER, START, 20)
+            pcall(function() iconBox:SetRenderTransformAngle(-angle) end)
+            Opacity(iconBox, 0.75)
+            entry.icon = iconBox
+            if opt.disabled then
+                local mark = Add(SizedImage(tree, ART .. "T_Disabled_Marker", 36, 34.5), CENTER, START, 42)
+                pcall(function() mark:SetRenderTransformAngle(-angle) end)
+            end
+            self.slots[i] = entry
+        end
+        local px, py = At(0, 0)
+        Place(canvas, seg, px, py, SEG_W, SEG_H, 0.5, 1.0)
+        pcall(function() seg:SetRenderTransformPivot({ X = 0.5, Y = 1.0 }) end)
+        pcall(function() seg:SetRenderTransformAngle(angle) end)
     end
 
-    local title = Text(tree, spec.title or "", 22, GOLD, 1)
-    Place(canvas, title, 0, -48, 270, 34)
-    local detail = Text(tree, "", 16, WHITE, 1)
-    Place(canvas, detail, 0, -8, 260, 30)
-    local desc = Text(tree, spec.hint or "Move the mouse to choose, click to cast. Esc cancels.", 14, GREY, 1)
+    -- Number-key boxes next to the options (keys 1-9 pick an option).
+    for i = 1, math.min(n, 9) do
+        local a = math.rad(self.slots[i].angle)
+        local box = New("/Script/UMG.Overlay", tree, "Key")
+        local bgKey = Image(tree, "/Game/Art/UI/Inputs/Keyboard/T_Keys-Standard-Blank", 32, 32)
+        pcall(function() box:AddChildToOverlay(bgKey) end)
+        local num = GameText(tree, tostring(i), false, 11, CREAM)
+        pcall(function()
+            local sl = box:AddChildToOverlay(num)
+            sl:SetHorizontalAlignment(2)
+            sl:SetVerticalAlignment(2)
+        end)
+        local px, py = At(math.sin(a) * KEY_RADIUS, -math.cos(a) * KEY_RADIUS)
+        Place(canvas, box, px, py, 32, 32)
+    end
+
+    -- Centre: the pointer turns towards the chosen option.
+    local pointer = Layer("T_Radial_Centre_Pointer", 630, 630)
+    Layer("T_Radial_Centre_Bg", 630, 630)
+    self.pointer = pointer
+
+    local px, py = At(0, -55)
+    local name = GameText(tree, "", true, 13, CREAM)
+    Place(canvas, name, px, py, 250, 30)
+    px, py = At(0, -38)
+    Place(canvas, Image(tree, ART .. "T_Header_Underline", 165.5, 1), px, py, 165.5, 1)
+    self.costRows, self.details = {}, {}
+    for i = 1, n do
+        local opt = options[i]
+        if opt.cost and #opt.cost > 0 then
+            local row = CostRow(tree, opt.cost)
+            px, py = At(0, -2)
+            Place(canvas, row, px, py, nil, nil, 0.5, 0.5)
+            Visible(row, false)
+            self.costRows[i] = row
+        else
+            local d = GameText(tree, opt.detail or "", false, 11, GOLD_TEXT)
+            px, py = At(0, -2)
+            Place(canvas, d, px, py, 220, 24)
+            Visible(d, false)
+            self.details[i] = d
+        end
+    end
+    local status = GameText(tree, "", false, 11, CREAM)
+    pcall(function() status:SetAutoWrapText(true) end)
+    px, py = At(0, 52)
+    Place(canvas, status, px, py, 220, 40)
+    px, py = At(0, 79)
+    Place(canvas, Image(tree, ART .. "T_Header_Underline", 165.5, 1), px, py, 165.5, 1)
+    self.name, self.status = name, status
+
+    -- Title bar above the wheel, with the spell's name.
+    -- (The bar image's band is 34 below the image's centre; the title sits on the band.)
+    px, py = At(0, -364)
+    Place(canvas, Image(tree, ART .. "T_Spells_TitleBar_Main", 740, 146), px, py, 740, 146)
+    px, py = At(0, -380)
+    Place(canvas, Image(tree, ART .. "T_Icon_Spellbook", 74.5, 63), px, py, 74.5, 63)
+    local title = GameText(tree, (spec.title or ""):upper(), true, 14, CREAM)
+    px, py = At(0, -330)
+    Place(canvas, title, px, py, 600, 34)
+
+    -- Description bar below the wheel.
+    px, py = At(0, 375)
+    Place(canvas, Image(tree, ART .. "T_Spells_Description_Bar", 883.5, 166), px, py, 883.5, 166)
+    local barTitle = New("/Script/UMG.HorizontalBox", tree, "BarTitle")
+    local barName = GameText(tree, "", true, 13, CREAM)
+    local barCooldown = GameText(tree, "", false, 11, DIM)
+    pcall(function() barTitle:AddChildToHorizontalBox(barName):SetVerticalAlignment(2) end)
+    pcall(function()
+        local sl = barTitle:AddChildToHorizontalBox(barCooldown)
+        sl:SetVerticalAlignment(2)
+        sl:SetPadding({ Left = 14, Top = 0, Right = 0, Bottom = 0 })
+    end)
+    px, py = At(0, 358)
+    Place(canvas, barTitle, px, py, nil, nil, 0.5, 0.5)
+    local desc = GameText(tree, "", false, 11, GOLD_TEXT)
     pcall(function() desc:SetAutoWrapText(true) end)
-    Place(canvas, desc, 0, 40, 250, 90)
-    self.title, self.detail, self.desc = title, detail, desc
+    px, py = At(0, 372)
+    Place(canvas, desc, px, py, 760, 48, 0.5, 0)
+    self.barName, self.barCooldown, self.desc = barName, barCooldown, desc
 
+    -- Controls, bottom right like the game's input legend.
+    local function Legend(label, texture, y)
+        local row = New("/Script/UMG.HorizontalBox", tree, "Legend")
+        local t = GameText(tree, label, false, 11, CREAM, 2)
+        pcall(function() row:AddChildToHorizontalBox(t):SetVerticalAlignment(CENTER) end)
+        local icon = SizedImage(tree, texture, 32, 32)
+        pcall(function()
+            local sl = row:AddChildToHorizontalBox(icon)
+            sl:SetVerticalAlignment(CENTER)
+            sl:SetPadding({ Left = 12, Top = 0, Right = 0, Bottom = 0 })
+        end)
+        Place(canvas, row, -112, y, nil, nil, 1, 0.5, 1, 1)
+    end
+    Legend("Cast", "/Game/Art/UI/Inputs/Mouse/T_Mouse-Buttons-Left", -117)
+    Legend("Close", "/Game/Art/UI/Inputs/Keyboard/T_Keys-Special-Esc", -72)
+
+    Opacity(w, 0)
     Show(w, 940)
     EnterUIMode(nil)
     active = self
@@ -205,34 +426,55 @@ function UI.Wheel(spec)
     function self.Highlight(idx)
         if self.hovered == idx then return end
         self.hovered = idx
-        for j, s in ipairs(self.slots) do
+        for j, s in pairs(self.slots) do
             local on = (j == idx)
-            pcall(function() s.frame:SetBrushColor(on and { R = 0.93, G = 0.78, B = 0.45, A = 0.55 } or { R = 0.1, G = 0.08, B = 0.05, A = 0.0 }) end)
+            local bad = options[j].disabled
+            Opacity(s.highlight, (on and not bad) and 1 or 0)
+            Opacity(s.highlightBad, (on and bad) and 1 or 0)
+            Opacity(s.icon, on and 1 or 0.75)
         end
+        for j, row in pairs(self.costRows) do Visible(row, j == idx) end
+        for j, d in pairs(self.details) do Visible(d, j == idx) end
         local opt = idx and options[idx]
         if opt then
-            SetText(self.title, opt.name or "")
-            SetText(self.detail, opt.detail or "", opt.disabled and RED or WHITE)
+            SetText(self.name, (opt.name or ""):upper())
+            SetText(self.status, opt.status or "", opt.statusBad and BAD or CREAM)
+            SetText(self.barName, (opt.name or ""):upper())
+            SetText(self.barCooldown, (opt.cooldown and opt.cooldown > 0) and ("Cooldown " .. opt.cooldown .. "s") or "")
             SetText(self.desc, opt.description or "")
         else
-            SetText(self.title, spec.title or "")
-            SetText(self.detail, "")
+            SetText(self.name, (spec.title or ""):upper())
+            SetText(self.status, "")
+            SetText(self.barName, (spec.title or ""):upper())
+            SetText(self.barCooldown, "")
             SetText(self.desc, spec.hint or "")
         end
     end
 
     function self.Tick()
+        local fade = (os.clock() - self.opened) / 0.12
+        if fade < 1.05 then Opacity(w, math.min(fade, 1)) end
         local m = MouseFromCenter()
-        if not m then return end
-        local dist = math.sqrt(m.X * m.X + m.Y * m.Y)
-        if dist < 60 then return end -- keep the last highlight inside the centre
-        local a = math.atan(m.Y, m.X)
-        local best, bestDiff = nil, math.huge
-        for j, s in ipairs(self.slots) do
-            local d = math.abs(math.atan(math.sin(a - s.angle), math.cos(a - s.angle)))
-            if d < bestDiff then best, bestDiff = j, d end
+        if m then
+            local mx, my = m.X, m.Y - cy
+            if mx * mx + my * my >= 60 * 60 then -- inside the centre the last choice stays
+                local a = math.deg(math.atan(mx, -my)) -- clockwise from the top, like the slots
+                local best, bestDiff = nil, math.huge
+                for j, s in pairs(self.slots) do
+                    local d = math.abs(AngleDiff(a, s.angle))
+                    if d < bestDiff then best, bestDiff = j, d end
+                end
+                self.Highlight(best)
+            end
         end
-        self.Highlight(best)
+        -- Turn the pointer smoothly towards the chosen option.
+        local target = self.hovered and self.slots[self.hovered] and self.slots[self.hovered].angle
+        if target then
+            local cur = self.pointerAngle or target
+            cur = cur + AngleDiff(target, cur) * 0.45
+            self.pointerAngle = cur
+            pcall(function() self.pointer:SetRenderTransformAngle(cur) end)
+        end
     end
 
     function self.Pick(idx)
@@ -256,7 +498,11 @@ function UI.Wheel(spec)
         end
     end
 
-    self.Highlight(nil)
+    -- Like the game, start on the option chosen last time.
+    local first = (spec.selected and self.slots[spec.selected]) and spec.selected or 1
+    self.Highlight(first)
+    self.pointerAngle = self.slots[first].angle
+    pcall(function() pointer:SetRenderTransformAngle(self.pointerAngle) end)
     return self
 end
 

@@ -118,8 +118,8 @@ local function LoadSpellFiles()
         files = {}
         local text = U.ReadFile(folder .. "_list.txt") or ""
         for line in text:gmatch("[^\r\n]+") do
-            line = line:gsub("^%s+", ""):gsub("%s+$", "")
-            if line ~= "" then files[#files + 1] = line end
+            local name = line:gsub("^%s+", ""):gsub("%s+$", "")
+            if name ~= "" then files[#files + 1] = name end
         end
     end
     for _, name in ipairs(files) do
@@ -317,16 +317,22 @@ local function CharacterKey()
     return "default"
 end
 
+-- Format 2 files were written after the fix for custom spells copying themselves into a
+-- new radial slot on every load. Older files can hold those extra copies.
+local SLOTS_FORMAT = 2
+
 local function LoadSlots(path)
     local slots = {}
     local text = U.ReadFile(path) or ""
     for slot, id in text:gmatch("(%d+)%s*=%s*([%w_]+)") do slots[tonumber(slot)] = id end
-    return slots
+    local format = tonumber(text:match("#%s*format%s+(%d+)")) or 1
+    return slots, format
 end
 
 local function SaveSlots()
     if not World.slotsFile then return end
-    local lines = { "# Spell Framework: which radial slots hold custom spells. Written by the mod." }
+    local lines = { "# Spell Framework: which radial slots hold custom spells. Written by the mod.",
+                    "# format " .. SLOTS_FORMAT }
     local keys = {}
     for slot in pairs(World.slots) do keys[#keys + 1] = slot end
     table.sort(keys)
@@ -369,6 +375,52 @@ local function RestoreSlots()
     return true
 end
 
+-- Empties a radial slot (saved as "" like any empty slot).
+local function ClearSlot(sc, arr, slot)
+    pcall(function() arr[slot + 1] = nil end)
+end
+
+-- Old slot files can list the same spell in many slots (see SLOTS_FORMAT). Keeps the
+-- first slot of each spell; returns the kept slots and a list of the other slots.
+local function KeepFirstCopies(slots)
+    local first = {}
+    for slot, id in pairs(slots) do
+        if not first[id] or slot < first[id] then first[id] = slot end
+    end
+    local kept, extra = {}, {}
+    for slot, id in pairs(slots) do
+        if first[id] == slot then kept[slot] = id else extra[#extra + 1] = slot end
+    end
+    return kept, extra
+end
+
+-- Unlocking a spell makes the game put it into the first empty radial slot. Custom spells
+-- are unlocked again on every load, so this removes custom spells from every slot the
+-- player didn't put them in, plus `extraSlots` (copies an old slot file still had; the
+-- save shows those as the alias spell). Returns how many slots were emptied.
+local function CleanRadial(extraSlots)
+    local sc = SpellcastingComponent()
+    local arr = sc and U.Get(sc, "SelectedSpells")
+    if not arr then return 0 end
+    local removed = 0
+    for i = 1, arr:GetArrayNum() do
+        local def = ByAddress[U.Addr(arr[i])]
+        if def and World.slots[i - 1] ~= def.id then
+            ClearSlot(sc, arr, i - 1)
+            removed = removed + 1
+        end
+    end
+    for _, slot in ipairs(extraSlots or {}) do
+        local current = arr[slot + 1]
+        if U.Valid(current) and not ByAddress[U.Addr(current)]
+            and U.Str(U.Get(current, "PersistenceID")) == AliasId then
+            ClearSlot(sc, arr, slot)
+            removed = removed + 1
+        end
+    end
+    return removed
+end
+
 -- Records which radial slots hold custom spells now.
 local function TrackSlots()
     local sc = SpellcastingComponent()
@@ -402,12 +454,24 @@ local function UpdateWorld()
         if os.clock() < (World.restoreAt or 0) then return end
         local key = CharacterKey()
         World.slotsFile = MOD_FOLDER .. "saved_slots_" .. key .. ".txt"
-        World.slots = LoadSlots(World.slotsFile)
+        local slots, format = LoadSlots(World.slotsFile)
+        local extra = {}
+        if format < SLOTS_FORMAT then slots, extra = KeepFirstCopies(slots) end
+        World.slots = slots
         if UnlockCustomSpells() and RestoreSlots() then
             World.restored = true
+            -- The game may place the unlocked spells a moment later; keep cleaning for a few seconds.
+            World.cleanUntil = os.clock() + 5
+            local removed = CleanRadial(extra)
+            SaveSlots()
+            if removed > 0 then U.Log("Removed %d extra copies of custom spells from the spell radial.", removed) end
             U.DebugLog("Character %s: custom spells unlocked and radial restored.", key)
         end
         return
+    end
+    if World.cleanUntil and os.clock() < World.cleanUntil then
+        local removed = CleanRadial(nil)
+        if removed > 0 then U.Log("Removed %d extra copies of custom spells from the spell radial.", removed) end
     end
     TrackSlots()
 end
@@ -623,24 +687,36 @@ local function RunVariant(def, variant)
     end
 end
 
+local LastVariant = {}    -- spell id -> index of the variant picked last time
+
 local function OpenVariantWheel(def)
     local options = {}
     for _, v in ipairs(def.variants) do
         local left = (Cooldowns[v.id] or 0) - os.clock()
-        local canPay = API.CanPay(v.costList)
-        local detail = API.CostText(v.costList)
-        if (v.cooldown or 0) > 0 then detail = detail .. "  -  " .. v.cooldown .. "s cooldown" end
-        if left > 0 then detail = string.format("Ready in %.0fs", left) end
-        if not canPay then detail = detail .. "  (not enough runes)" end
-        options[#options + 1] = { name = v.name, description = v.description, icon = v.icon, detail = detail, disabled = (left > 0) or not canPay }
+        local canPay, missing = API.CanPay(v.costList)
+        local status, bad = "", false
+        if left > 0 then
+            status, bad = string.format("Ready in %.0fs", left), true
+        elseif not canPay then
+            status, bad = "Not enough " .. tostring(missing), true
+        end
+        local cost = {}
+        for _, c in ipairs(v.costList or {}) do cost[#cost + 1] = { icon = c.icon, count = c.count, name = c.name } end
+        options[#options + 1] = {
+            name = v.name, description = v.description, icon = v.icon,
+            cost = cost, detail = API.CostText(v.costList), cooldown = v.cooldown,
+            status = status, statusBad = bad, disabled = bad,
+        }
     end
     UI.Wheel({
         title = def.name,
         hint = def.description ~= "" and def.description or "Choose a spell.",
         options = options,
+        selected = LastVariant[def.id],
         onPick = function(idx)
             local v = def.variants[idx]
             if not v then return end
+            LastVariant[def.id] = idx
             local left = (Cooldowns[v.id] or 0) - os.clock()
             if left > 0 then
                 UI.Toast(string.format("%s is ready in %.0f seconds.", v.name, left))
